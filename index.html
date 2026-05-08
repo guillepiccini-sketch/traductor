@@ -47,14 +47,16 @@
   .mic-btn:active:not(:disabled):not(.processing) { transform: scale(0.96); }
   .mic-btn.listening { background: var(--accent); border-color: transparent; }
   .mic-btn.processing { opacity: 0.4; cursor: default; }
+  .mic-btn.speaking { background: var(--pt-color); border-color: transparent; }
   .mic-btn svg { width: 32px; height: 32px; fill: none; stroke: var(--text2); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: stroke 0.2s; }
-  .mic-btn.listening svg { stroke: #fff; }
+  .mic-btn.listening svg, .mic-btn.speaking svg { stroke: #fff; }
   .mic-btn-label { font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text3); }
   footer { padding: 20px 0 40px; display: flex; align-items: center; justify-content: center; gap: 8px; }
   .status-indicator { width: 5px; height: 5px; border-radius: 50%; background: var(--text3); transition: background 0.3s; flex-shrink: 0; }
   .status-indicator.listening { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
   .status-indicator.ok { background: var(--pt-color); }
   .status-indicator.processing { background: var(--es-color); animation: blink 0.8s ease-in-out infinite; }
+  .status-indicator.speaking { background: var(--pt-color); animation: blink 0.6s ease-in-out infinite; }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
   .status-label { font-family: 'Syne', sans-serif; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text3); }
   .waveform { display: flex; align-items: center; gap: 3px; height: 20px; opacity: 0; transition: opacity 0.3s; }
@@ -65,6 +67,8 @@
   @keyframes wave { 0%,100%{height:4px} 50%{height:16px} }
   .error-toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--surface2); border: 0.5px solid rgba(232,69,42,0.4); color: #e8452a; font-size: 12px; font-family: 'DM Sans', sans-serif; padding: 10px 18px; border-radius: 40px; white-space: nowrap; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
   .error-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .stop-btn { background: none; border: 0.5px solid var(--border2); color: var(--text3); font-family: 'Syne', sans-serif; font-size: 10px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 14px; border-radius: 40px; cursor: pointer; opacity: 0; transition: opacity 0.3s; -webkit-tap-highlight-color: transparent; }
+  .stop-btn.visible { opacity: 1; }
 </style>
 </head>
 <body>
@@ -97,6 +101,7 @@
         <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
       </div>
       <span class="mic-btn-label" id="btn-label">Iniciar</span>
+      <button class="stop-btn" id="stop-btn">Detener sesión</button>
     </div>
   </main>
   <footer>
@@ -115,8 +120,10 @@
   const errorToast = document.getElementById('error-toast');
   const ringPulse = document.getElementById('ring-pulse');
   const waveform = document.getElementById('waveform');
+  const stopBtn = document.getElementById('stop-btn');
 
   let isListening = false;
+  let sessionActive = false;
   let recognition = null;
   const synth = window.speechSynthesis;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -124,6 +131,26 @@
   if (!SpeechRecognition) {
     showError('Usá Chrome o Safari para reconocimiento de voz');
     micBtn.disabled = true;
+  }
+
+  // Preload voices
+  let voices = [];
+  function loadVoices() {
+    voices = synth.getVoices();
+  }
+  loadVoices();
+  synth.onvoiceschanged = loadVoices;
+
+  function getBestVoice(lang) {
+    const prefix = lang === 'pt' ? 'pt' : 'es';
+    // Prefer male voices: look for names containing 'male', or common male voice names
+    const maleKeywords = ['male', 'man', 'masc', 'daniel', 'diego', 'jorge', 'carlos', 'miguel', 'ricardo', 'lucas', 'joao', 'joão', 'antonio', 'google'];
+    const langVoices = voices.filter(v => v.lang.toLowerCase().startsWith(prefix));
+    if (!langVoices.length) return null;
+    // Try to find male voice
+    const maleVoice = langVoices.find(v => maleKeywords.some(k => v.name.toLowerCase().includes(k)));
+    // Fallback to first available for that language
+    return maleVoice || langVoices[0];
   }
 
   function setStatus(state, msg) {
@@ -150,14 +177,13 @@
   }
 
   function detectLang(text) {
-    const ptWords = /\b(você|voce|obrigado|obrigada|olá|ola|tudo|sim|não|nao|muito|isso|este|esta|pelo|pela|também|tambem|então|entao|quando|nossa|esse|essa|gente|cara|legal|bacana|né|pois|consegue|fazer|trabalho|meu|minha|aqui|ali|bom|dia|boa|noite|tarde)\b/gi;
+    const ptWords = /\b(você|voce|obrigado|obrigada|olá|ola|tudo|sim|não|nao|muito|isso|este|esta|pelo|pela|também|tambem|então|entao|quando|nossa|esse|essa|gente|cara|legal|bacana|né|pois|consegue|fazer|trabalho|meu|minha|aqui|ali|bom|boa|noite|tarde)\b/gi;
     return (text.match(ptWords) || []).length >= 1 ? 'pt' : 'es';
   }
 
   async function translate(text, fromLang) {
     const toLang = fromLang === 'es' ? 'pt' : 'es';
-    const langPair = fromLang + '|' + toLang;
-    const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + langPair;
+    const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + fromLang + '|' + toLang;
     const res = await fetch(url);
     const data = await res.json();
     if (data.responseStatus !== 200) throw new Error('Translation failed');
@@ -165,32 +191,43 @@
   }
 
   function speakText(text, lang) {
-    synth.cancel();
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.lang = lang === 'pt' ? 'pt-BR' : 'es-AR';
-    utt.rate = 0.93;
-    const voices = synth.getVoices();
-    const match = voices.find(v => v.lang.startsWith(lang === 'pt' ? 'pt' : 'es'));
-    if (match) utt.voice = match;
-    synth.speak(utt);
-    return new Promise(r => { utt.onend = r; utt.onerror = r; });
+    return new Promise(resolve => {
+      synth.cancel();
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.lang = lang === 'pt' ? 'pt-BR' : 'es-AR';
+      utt.rate = 1.25;   // más rápido
+      utt.pitch = 0.85;  // más grave / masculino
+      utt.volume = 1;
+      const voice = getBestVoice(lang);
+      if (voice) utt.voice = voice;
+      utt.onend = resolve;
+      utt.onerror = resolve;
+      synth.speak(utt);
+    });
   }
 
   function setListeningUI(active) {
     micBtn.className = 'mic-btn' + (active ? ' listening' : '');
     ringPulse.className = 'mic-ring-pulse' + (active ? ' active' : '');
     waveform.className = 'waveform' + (active ? ' active' : '');
-    btnLabel.textContent = active ? 'Escuchando...' : 'Iniciar';
+    btnLabel.textContent = active ? 'Escuchando...' : (sessionActive ? 'Escuchando...' : 'Iniciar');
+  }
+
+  function setSpeakingUI(active) {
+    micBtn.className = 'mic-btn' + (active ? ' speaking' : '');
+    ringPulse.className = 'mic-ring-pulse' + (active ? ' active' : '');
+    btnLabel.textContent = active ? 'Reproduciendo...' : '';
   }
 
   function setProcessingUI(active) {
     micBtn.className = 'mic-btn' + (active ? ' processing' : '');
-    btnLabel.textContent = active ? 'Traduciendo...' : 'Iniciar';
+    btnLabel.textContent = active ? 'Traduciendo...' : '';
   }
 
   function startListening() {
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition || !sessionActive) return;
     synth.cancel();
+
     recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = false;
@@ -205,49 +242,97 @@
 
     recognition.onresult = async (e) => {
       const raw = e.results[0][0].transcript.trim();
-      if (!raw) return;
+      if (!raw) { if (sessionActive) setTimeout(startListening, 300); return; }
+
       setListeningUI(false);
       setProcessingUI(true);
       setStatus('processing', 'Traduciendo');
+
       const detectedLang = detectLang(raw);
       const targetLang = detectedLang === 'es' ? 'pt' : 'es';
       addBubble(raw, 'original', detectedLang === 'es' ? '🇦🇷 Escuchado en español' : '🇧🇷 Ouvido em português');
+
       try {
         const translated = await translate(raw, detectedLang);
         addBubble(translated, 'translation', targetLang === 'pt' ? '→ 🇧🇷 Tradução em português' : '→ 🇦🇷 Traducido al español');
-        setStatus('ok', 'Reproduciendo');
+        setProcessingUI(false);
+        setSpeakingUI(true);
+        setStatus('speaking', 'Reproduciendo');
         await speakText(translated, targetLang);
       } catch (err) {
         showError('Error al traducir. Intentá de nuevo.');
+        setProcessingUI(false);
       }
-      setProcessingUI(false);
-      setStatus('ok', 'Listo');
+
+      setSpeakingUI(false);
       isListening = false;
+
+      // Auto-restart listening if session still active
+      if (sessionActive) {
+        setTimeout(startListening, 400);
+      } else {
+        setStatus('', 'Listo');
+        btnLabel.textContent = 'Iniciar';
+      }
     };
 
     recognition.onerror = (e) => {
       isListening = false;
       setListeningUI(false);
       setProcessingUI(false);
-      if (e.error === 'no-speech') setStatus('', 'Sin voz detectada');
-      else if (e.error === 'not-allowed') showError('Permiso de micrófono denegado');
-      else { setStatus('', 'Error'); showError('Error: ' + e.error); }
+      if (e.error === 'not-allowed') {
+        showError('Permiso de micrófono denegado');
+        stopSession();
+      } else if (e.error === 'no-speech' && sessionActive) {
+        setTimeout(startListening, 300);
+      } else if (sessionActive) {
+        setTimeout(startListening, 500);
+      }
     };
 
     recognition.onend = () => {
-      if (isListening) { isListening = false; setListeningUI(false); setStatus('', 'Listo'); }
+      if (isListening && sessionActive) {
+        isListening = false;
+        setTimeout(startListening, 300);
+      }
     };
 
     recognition.start();
   }
 
+  function startSession() {
+    sessionActive = true;
+    stopBtn.classList.add('visible');
+    btnLabel.textContent = 'Escuchando...';
+    setStatus('listening', 'Sesión activa');
+    startListening();
+  }
+
+  function stopSession() {
+    sessionActive = false;
+    isListening = false;
+    recognition?.stop();
+    synth.cancel();
+    stopBtn.classList.remove('visible');
+    setListeningUI(false);
+    setSpeakingUI(false);
+    setProcessingUI(false);
+    setStatus('', 'Listo');
+    btnLabel.textContent = 'Iniciar';
+    micBtn.className = 'mic-btn';
+    ringPulse.className = 'mic-ring-pulse';
+  }
+
   micBtn.addEventListener('click', () => {
     if (micBtn.classList.contains('processing')) return;
-    if (isListening) recognition?.stop();
-    else startListening();
+    if (sessionActive) {
+      stopSession();
+    } else {
+      startSession();
+    }
   });
 
-  synth.onvoiceschanged = () => {};
+  stopBtn.addEventListener('click', stopSession);
 </script>
 </body>
 </html>
